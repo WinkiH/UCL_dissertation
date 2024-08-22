@@ -1,0 +1,315 @@
+# What's this?
+
+-   It calculates the correlation between footfall and (1) number of connected wards -- indicating connectivity and (2) travelling time between wards and footfall locations
+-   It includes the Pearson's correlation test and T-test
+-   It shows the relationship as indicated by the Pearson's Correlation coefficient and p-value that either rejects or accepts null hypothesis
+
+# Load required package
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+# install.packages("ggpubr")
+library(ggpubr)
+```
+
+# Load requried csv
+
+```{r}
+mon_corr_connect_wards <- read_csv(here::here("ff_access_connectwards_mon.csv"))
+mon_corr_tt <- read_csv(here::here("ff_access_avg_tt.csv"))
+
+tue_corr_connect_wards <- read_csv(here::here("ff_access_connectedwards_tue.csv"))
+tue_corr_tt <- read_csv(here::here("ff_access_avg_tt_tue.csv"))
+
+wed_corr_connect_wards <- read_csv(here::here("ff_access_connectwards_wed.csv"))
+wed_corr_tt <- read_csv(here::here("ff_access_avgtt_wed.csv"))
+
+thurs_corr_connect_wards <- read_csv(here::here("ff_access_connectedwards_thurs.csv"))
+thurs_corr_tt <- read_csv(here::here("ff_access_avgtt_thurs.csv"))
+
+fri_corr_connect_wards <- read_csv(here::here("ff_access_connectedwards_fri.csv"))
+fri_corr_tt <- read_csv(here::here("ff_access_avgtt_fri.csv"))
+
+sat_corr_connect_wards <- read_csv(here::here("ff_access_connectedwards_sat.csv"))
+sat_corr_tt <- read_csv(here::here("ff_access_avgtt_sat.csv"))
+
+sun_corr_connect_wards <- read_csv(here::here("ff_connectedwards_sun.csv"))
+sun_corr_tt <- read_csv(here::here("ff_access_avgtt_sun.csv"))
+```
+
+# Correlation between ff and number of connected wards
+
+## Monday
+
+```{r}
+# Monday
+ggplot(mon_corr_connect_wards, aes(x = no_connected_wards, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Number of connected wards",
+       title = "Monday") +
+  theme_minimal()
+```
+
+```{r}
+# Calculate correlation coefficient
+correlation_mon_connect <- cor(mon_corr_connect_wards$no_connected_wards, mon_corr_connect_wards$ff_count)
+print(paste("Correlation coefficient:", correlation_mon_connect))
+
+```
+
+## Tue
+
+```{r}
+ggplot(tue_corr_connect_wards, aes(x = no_connected_wards, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Number of connected wards",
+       title = "Tuesday") +
+  theme_minimal()
+```
+
+```{r}
+# Calculate correlation coefficient
+correlation_tue_connect <- cor(tue_corr_connect_wards$no_connected_wards, tue_corr_connect_wards$ff_count)
+print(paste("Correlation coefficient:", correlation_tue_connect))
+
+```
+
+## Wed
+
+```{r}
+ggplot(wed_corr_connect_wards, aes(x = no_connected_wards, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Number of connected wards",
+       title = "Wednesday") +
+  theme_minimal()
+```
+
+```{r}
+# Calculate correlation coefficient
+correlation_wed_connect <- cor(wed_corr_connect_wards$no_connected_wards, wed_corr_connect_wards$ff_count)
+print(paste("Correlation coefficient:", correlation_wed_connect))
+
+```
+
+## Thurs
+
+```{r}
+ggplot(thurs_corr_connect_wards, aes(x = no_connected_wards, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Number of connected wards",
+       title = "Thursday") +
+  theme_minimal()
+```
+
+```{r}
+# Calculate correlation coefficient
+correlation_thurs_connect <- cor(thurs_corr_connect_wards$no_connected_wards, thurs_corr_connect_wards$ff_count)
+print(paste("Correlation coefficient:", correlation_thurs_connect))
+```
+
+## Fri
+
+```{r}
+ggplot(fri_corr_connect_wards, aes(x = no_connected_wards, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Number of connected wards",
+       title = "Friday") +
+  theme_minimal()
+```
+
+```{r}
+correlation_fri_connect <- cor(fri_corr_connect_wards$no_connected_wards, fri_corr_connect_wards$ff_count)
+print(paste("Correlation coefficient:", correlation_fri_connect))
+```
+
+## Sat
+
+```{r}
+# Sat
+ggplot(sat_corr_connect_wards, aes(x = no_connected_wards, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Number of conencted wards",
+       title = "Saturday") +
+  theme_minimal()
+```
+
+```{r}
+correlation_sat_connect <- cor(sat_corr_connect_wards$no_connected_wards, sat_corr_connect_wards$ff_count)
+print(paste("Correlation coefficient:", correlation_sat_connect))
+```
+
+## Sun
+
+```{r}
+# Sun
+ggplot(sun_corr_connect_wards, aes(x = no_connected_wards, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Number of connected wards",
+       title = "Sunday") +
+  theme_minimal()
+```
+
+```{r}
+correlation_sun_connect <- cor(sun_corr_connect_wards$no_connected_wards, sun_corr_connect_wards$ff_count)
+print(paste("Correlation coefficient:", correlation_sun_connect))
+```
+
+------------------------------------------------------------------------
+
+# Correltaion between ff and avg travelling time
+
+## Mon
+
+```{r}
+ggplot(mon_corr_tt, aes(x = avg_tt, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Average travelling time",
+       title = "Monday") +
+  theme_minimal()
+```
+
+```{r}
+correlation_mon_avgtt <- cor(mon_corr_tt$avg_tt, mon_corr_tt$ff_count)
+print(paste("Correlation coefficient:", correlation_mon_avgtt))
+
+```
+
+## Tue
+
+```{r}
+ggplot(tue_corr_tt, aes(x = avg_tt, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Average travelling time",
+       title = "Tuesday") +
+  theme_minimal()
+```
+
+```{r}
+correlation_tue_avgtt <- cor(tue_corr_tt$avg_tt, tue_corr_tt$ff_count)
+print(paste("Correlation coefficient:", correlation_tue_avgtt))
+
+```
+
+## Wed
+
+```{r}
+ggplot(wed_corr_tt, aes(x = avg_tt, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Average travelling time",
+       title = "Wednesday") +
+  theme_minimal()
+```
+
+```{r}
+correlation_wed_avgtt <- cor(wed_corr_tt$avg_tt, wed_corr_tt$ff_count)
+print(paste("Correlation coefficient:", correlation_wed_avgtt))
+```
+
+## Thurs
+
+```{r}
+ggplot(thurs_corr_tt, aes(x = avg_tt, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Average travelling time",
+       title = "Thursday") +
+  theme_minimal()
+```
+
+```{r}
+correlation_thurs_avgtt <- cor(thurs_corr_tt$avg_tt, thurs_corr_tt$ff_count)
+print(paste("Correlation coefficient:", correlation_thurs_avgtt))
+```
+
+## Fri
+
+```{r}
+ggplot(fri_corr_tt, aes(x = avg_tt, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Average travelling time",
+       title = "Friday") +
+  theme_minimal()
+```
+
+```{r}
+correlation_fri_avgtt <- cor(fri_corr_tt$avg_tt, fri_corr_tt$ff_count)
+print(paste("Correlation coefficient:", correlation_fri_avgtt))
+```
+
+## Sat
+
+```{r}
+ggplot(sat_corr_tt, aes(x = avg_tt, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Average travelling time",
+       title = "Saturday") +
+  theme_minimal()
+```
+
+```{r}
+correlation_sat_avgtt <- cor(sat_corr_tt$avg_tt, sat_corr_tt$ff_count)
+print(paste("Correlation coefficient:", correlation_sat_avgtt))
+```
+
+## Sun
+
+```{r}
+ggplot(sun_corr_tt, aes(x = avg_tt, y = ff_count)) +
+  geom_point(color = "blue") +  # Scatter plot
+  geom_smooth(method = "lm", color = "red") + # regression line
+  stat_cor(method = "pearson") +
+  labs(x = "Footfall Count",
+       y = "Average travelling time",
+       title = "Sunday") +
+  theme_minimal()
+```
+
+```{r}
+correlation_sun_avgtt <- cor(sun_corr_tt$avg_tt, sun_corr_tt$ff_count)
+print(paste("Correlation coefficient:", correlation_sun_avgtt))
+```
+
+```{r}
+p_sun_avgtt <- summary(sun_corr_tt$coefficients["x", "Pr(>|t|)"])
+print(p_sun_avgtt)
+```
