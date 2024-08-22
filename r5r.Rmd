@@ -1,0 +1,2669 @@
+# What's this?
+
+-   R package that calculates travel time matrix
+-   An indicator of accessibility across London
+
+```{r}
+install.packages("r5r")
+options(java.parameters = "-Xmx2G")
+install.packages("akima")
+
+install.packages("gtfs2gps")
+```
+
+# Loading library package
+
+```{r}
+library(r5r)
+library(sf)
+library(ggplot2)
+library(data.table)
+library(osmdata)
+library(dplyr)
+library(tidyverse)
+library(tmap)
+library(leaflet)
+library(mapview)
+library(rJava)
+library(janitor)
+library(akima)
+library(gtfs2gps)
+```
+
+<https://ipeagit.github.io/intro_access_book/3_calculando_acesso.en.html>
+
+```{r}
+options(java.parameters = "-Xmx32G")
+```
+
+## Setting up network in r package
+
+```{r}
+path = ("/Users/wingkaho/Desktop/UCL/CASA0004_Dissertation/CASA0004_DissTest/DissTest/r5r_data")
+r5r_core <- setup_r5(data_path = path)
+```
+
+# Data wrangling
+
+```{r}
+# Loading london footfall location data (csv file)
+london_ff <- read.csv(here::here("london_ff.csv"))
+location <- read.csv(here::here("CDRC", "UWB_Metadata_ONLINE.csv"), header = TRUE, sep = ",", encoding = "latin1", na = " ")
+location <- location %>%
+  dplyr::rename(instsigid = "InstSigID") %>%
+  clean_names()
+location <- location %>%
+  filter(instsigid %in% c("100027", "100059", "100065", "100070", "100072", 
+                          "100081", "100087", "100088", "100089", "100091", 
+                          "100092", "100095", "100098")) %>%
+  clean_names()
+
+# Loading shapefile of boroughs, wards, and lsoas + calculate centroids of them to get the origin location for accessibility matrix
+boroughs <- st_read(here::here("statistical-gis-boundaries-london", "ESRI", "London_Borough_Excluding_MHW.shp"))
+boroughs %>% mapview()
+wards <- st_read(here::here("statistical-gis-boundaries-london", "ESRI", "London_Ward.shp"))
+wards %>% mapview()
+#lsoas <- st_read(here::here("statistical-gis-boundaries-london", "ESRI", "LSOA_2011_London_gen_MHW.shp"))
+#lsoas %>% mapview()
+
+# Reprojecting file onto the same projection
+london_location_points <- location %>%
+  drop_na(longitude, latitude) %>%
+  st_as_sf(., coords = c("longitude", "latitude"),
+           crs = 4326)
+
+coords <- st_coordinates(london_location_points)
+london_location_points <- london_location_points %>%
+  mutate(longitude = coords[, 1],
+         latitude = coords[, 2])
+
+
+boroughs <- boroughs %>%
+  st_transform(., 4326)
+wards <- wards %>%
+  st_transform(., 4326)
+wards
+#lsoas <- lsoas %>%
+  #st_transform(., 4326)
+
+# Take a centroid
+wards_centroid <- wards %>%
+  st_centroid() %>%
+  st_geometry()
+ggplot() + 
+  geom_sf(data = boroughs, fill = 'white') +
+  geom_sf(data = boroughs_centroid, color = 'red')
+wards_centroid <- wards %>%
+  st_centroid() %>%
+  st_geometry()
+ggplot() +
+  geom_sf(data = wards, fill = 'white') +
+  geom_sf(data = wards_centroid, color = 'red')
+
+boroughs_with_centroids <- boroughs %>%
+  mutate(centroid_long = st_coordinates(boroughs_centroid)[,1],
+         centroid_lat = st_coordinates(boroughs_centroid)[,2])
+
+wards_with_centroids <- wards %>%
+  mutate(centroid_long = st_coordinates(wards_centroid)[,1],
+         centroid_lat = st_coordinates(wards_centroid)[,2])
+
+boroughs_with_centroid_df <- data.frame(boroughs_with_centroids)
+wards_with_centroid_df <- data.frame(wards_with_centroids)
+
+
+```
+
+# Setting up poi for calculation
+
+```{r}
+dest_ff_location <- london_location_points %>%
+  select(street, longitude, latitude)
+ori_wards <- wards_with_centroids %>%
+  select(GSS_CODE, centroid_long, centroid_lat)
+ori_boroughs <- boroughs_with_centroids %>%
+  select(NAME, centroid_long, centroid_lat)
+
+ori_boroughs$NAME<- str_replace_all(ori_boroughs$NAME, " ", "") %>%
+  str_to_lower()
+ori_wards$NAME <- str_replace_all(ori_wards$NAME, " ", "") %>%
+  str_to_lower()
+dest_ff_location$street <- str_replace_all(dest_ff_location$street, " ", "") %>%
+  str_to_lower()
+```
+
+# Export csv for accessibility matrix calculation
+
+```{r}
+# Export as csv ready for accessibility matrix calculation
+#write.csv(dest_ff_location, file = "dest_test_accessibility_matrix.csv", row.names = FALSE)
+#write.csv(ori_boroughs, file = "boroughs_ori_centroids_accessibility_matrix.csv", row.names = FALSE)
+write.csv(ori_wards, file = "ori_wards_centroids_accessibility_matrix.csv", row.names = FALSE)
+```
+
+# Start
+
+```{r}
+ori_boroughs_point <- read_csv(here::here("ori_boroughs_accessibility_matrix.csv"))
+ori_boroughs_point <- na.omit(ori_boroughs_point)
+ori_wards_point <- read_csv(here::here("ori_wards_gss_code.csv"), show_col_types = FALSE)
+dest_ff_point <- read_csv(here::here("dest_test_accessibility_matrix.csv"))
+ori_wards_point <- drop_na(ori_wards_point)
+
+
+# Find duplicated rows
+duplicate_rows <- ori_wards_point[duplicated(ori_wards_point) | duplicated(ori_wards_point, fromLast = TRUE), ]
+
+# Display duplicated rows
+print(duplicate_rows)
+
+```
+
+# Result
+
+*date* - Monday: 31 Jan - Tuesday: 12 April - Wednesday: 16 March - Thursday: 3 March - Friday: 11 Feb - Saturday: 5 Feb - Sunday: 20 March
+
+*time* - Morn: 10:00 - Noon: 12:00 - Afternoon: 14:00 - Evening: 19:00 - Midnight: 00:00 AND 03:00 (test the differences between night tube and non night tube day)
+
+*mode* - Transit - Subway - Rail - Bus - Tram - Ferry - Cable Car - Walk - Car
+
+## All time series (same weekday and same departure time but different months)
+
+-   to show the accessibility throughout the months didnt change much that affect the footfall as a whole.
+
+### Weekday
+
+### Jan 24 1400
+
+```{r}
+
+mode <- "TRANSIT"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("24-01-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+jan_ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+### Feb 21 1400
+
+```{r}
+# Noon 12:00
+mode <- "TRANSIT"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("21-02-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+feb_ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+### 20 March 1400
+
+```{r}
+# Afternoon 14:00
+mode <- "TRANSIT"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("20-03-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+march_ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+### April 17 1400
+
+```{r}
+# Night 19:00
+mode <- "TRANSIT"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("17-04-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+apr_ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+### Weekend
+
+### Jan 27 1400
+
+```{r}
+# Midnight 00:00
+mode <- "TRANSIT"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("27-01-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+jan_weekend_ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+### Feb 17 1400
+
+```{r}
+# Midnight 03:00
+mode <- "TRANSIT"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("17-02-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+feb_weekend_ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+### March 16 1400
+
+```{r}
+mode <- "TRANSIT"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("16-03-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+march_weekend_ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+### April 20
+
+```{r}
+mode <- "TRANSIT"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("20-04-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+apr_weekend_ttm <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+#### Export ttm
+
+```{r}
+write.csv(jan_ttm, file = "jan_ttm.csv", row.names = TRUE)
+write.csv(feb_ttm, file = "feb_ttm.csv", row.names = TRUE)
+write.csv(march_ttm, file = "march_ttm.csv", row.names = TRUE)
+write.csv(apr_ttm, file = "apr_ttm.csv", row.names = TRUE)
+write.csv(jan_weekend_ttm, file = "jan_weekend_ttm.csv", row.names = TRUE)
+write.csv(feb_weekend_ttm, file = "feb_weekend_ttm.csv", row.names = TRUE)
+write.csv(march_weekend_ttm, file = "march_weekend_ttm.csv", row.names = TRUE)
+write.csv(apr_weekend_ttm, file = "apr_weekend_ttm.csv", row.names = TRUE)
+```
+
+## Monday 22 Jan (short travel time)
+
+### Transit
+
+```{r}
+# Morn 10:00
+mode <- ("TRANSIT")
+#max_walk_time <- 30 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("22-01-2024 10:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+mon_morn_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+# Afternoon 14:00
+mode <- ("TRANSIT")
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("22-01-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+mon_afternoon_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+# Night 19:00
+mode <- ("TRANSIT")
+#max_walk_time <- 0 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("22-01-2024 19:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+mon_night_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+# Midnight 00:00
+mode <- ("TRANSIT")
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("22-01-2024 00:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+mon_midnight_0000_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+# Midnight 03:00
+mode <- ("TRANSIT")
+# max_walk_time <- 30 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("22-01-2024 03:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+mon_midnight_0300_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+map(unique(mon_morn_transit_1$mode), function(m) {
+  #map(unique(access_df$cutoff), function(c, m) {
+    p <- access_df %>%
+      filter(mode == m) %>%
+      left_join(wards, by = c("from_id" = "GSS_CODE")) %>%
+      ggplot(aes(fill=travel_time_p50/1000)) +
+      geom_sf(aes(geometry=geom), size=0.2) +
+      coord_sf(datum=NA) +
+      scale_fill_distiller(palette = "Spectral") +
+      labs(fill = "Accessibility\nJobs (x1000)") +
+      theme_light() +
+      theme(legend.position = "right") +
+      labs(title = "Accessibility to Jobs in the GLA",
+           subtitle = paste0("mode = ", m, ", travel time cutoff = ", c, " minutes"))
+    
+    ggsave(plot = p, filename = file.path(path,paste0("map_gla_", m) ), 
+           dpi = 300, width = 20, height = 15, units = "cm")
+
+})
+```
+
+```{r}
+mon_morn_transit_1 %>%
+  left_join(wards, by = c("from_id"="GSS_code")) %>%
+  arrange(travel_time_p50) %>%
+  ggplot(aes(fill=travel_time_p50)) +
+  geom_sf(aes(geometry=geom), color=NA) +
+  scale_fill_distiller(palette = "Spectral") +
+  facet_grid(mode~cutoff)
+
+access_sf <- left_join(wards, mon_morn_transit_1, by = c("from_id"="GSS_code")) 
+```
+
+#### Export ttm
+
+```{r}
+write.csv(mon_morn_transit_1, file = "mon_morn_transit_1.csv", row.names = TRUE)
+#write.csv(mon_noon_transit_1, file = "mon_noon_transit_1.csv", row.names = TRUE)
+write.csv(mon_afternoon_transit_1, file = "mon_afternoon_transit_1.csv", row.names = TRUE)
+write.csv(mon_night_transit_1, file = "mon_night_transit_1.csv", row.names = TRUE)
+write.csv(mon_midnight_0000_transit_1, file = "mon_midnight_0000_transit_1.csv", row.names = TRUE)
+write.csv(mon_midnight_0300_transit_1, file = "mon_midnight_0300_transit_1.csv", row.names = TRUE)
+```
+
+#### Avg travelling time for each location
+
+*mon morn*
+
+```{r}
+# Subset 
+bgs_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_mon_morn_transit_1 <- mon_morn_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_mon_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_mon_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_mon_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_mon_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_mon_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_mon_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_mon_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_mon_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_mon_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_mon_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_mon_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_mon_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_mon_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+*noon*
+
+```{r}
+bgs_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_mon_noon_transit_1 <- mon_afternoon_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+
+# Avg tt 
+mean(bgs_mon_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_mon_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_mon_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_mon_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_mon_noon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_mon_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_mon_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_mon_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_mon_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_mon_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_mon_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_mon_noon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_mon_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+*night*
+
+```{r}
+bgs_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_mon_night_transit_1 <- mon_night_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+
+# Avg tt 
+mean(bgs_mon_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_mon_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_mon_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_mon_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_mon_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_mon_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_mon_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_mon_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_mon_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_mon_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_mon_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_mon_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_mon_night_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_mon_midnight_transit_1 <- mon_midnight_0300_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+
+# Avg tt 
+mean(bgs_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_mon_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+*sat morn*
+
+```{r}
+# Subset 
+bgs_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_sat_morn_transit_1 <- sat_morn_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_sat_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_sat_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_sat_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_sat_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_sat_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_sat_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_sat_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_sat_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_sat_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_sat_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_sat_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_sat_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_sat_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+*noon*
+
+```{r}
+# Subset 
+bgs_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_sat_noon_transit_1 <- sat_afternoon_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_sat_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_sat_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_sat_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_sat_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_sat_noon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_sat_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_sat_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_sat_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_sat_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_sat_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_sat_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_sat_noon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_sat_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+*night*
+
+```{r}
+# Subset 
+bgs_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_sat_night_transit_1 <- sat_night_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_sat_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_sat_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_sat_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_sat_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_sat_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_sat_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_sat_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_sat_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_sat_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_sat_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_sat_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_sat_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_sat_night_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+*midnight*
+
+```{r}
+# Subset 
+bgs_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_sat_midnight_transit_1 <- sat_midnight_0300_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_sat_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_tue_morn_transit_1 <- tue_morn_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_tue_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_tue_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_tue_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_tue_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_tue_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_tue_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_tue_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_tue_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_tue_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_tue_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_tue_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_tue_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_tue_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_tue_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_tue_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_tue_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_tue_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_tue_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_tue_noon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_tue_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_tue_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_tue_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_tue_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_tue_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_tue_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_tue_noon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_tue_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_tue_night_transit_1 <- tue_night_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_tue_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_tue_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_tue_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_tue_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_tue_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_tue_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_tue_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_tue_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_tue_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_tue_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_tue_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_tue_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_tue_night_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_tue_midnight_transit_1 <- tue_midnight_0300_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_tue_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_wed_morn_transit_1 <- wed_morn_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_wed_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_wed_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_wed_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_wed_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_wed_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_wed_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_wed_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_wed_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_wed_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_wed_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_wed_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_wed_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_wed_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_wed_noon_transit_1 <- tue_afternoon_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_wed_noon_transit_1 <- wed_afternoon_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_wed_noon_transit_1 <- wed_afternoon_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_wed_noon_transit_1 <- wed_afternoon_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_wed_noon_transit_1 <- wed_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_wed_noon_transit_1 <- wed_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_wed_noon_transit_1 <- wed_afternoon_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_wed_noon_transit_1 <- wed_afternoon_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_wed_noon_transit_1 <- wed_afternoon_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_wed_noon_transit_1 <- wed_afternoon_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_wed_noon_transit_1 <- wed_afternoon_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_wed_noon_transit_1 <- wed_afternoon_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_wed_noon_transit_1 <- wed_afternoon_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_wed_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_wed_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_wed_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_wed_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_wed_noon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_wed_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_wed_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_wed_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_wed_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_wed_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_wed_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_wed_noon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_wed_noon_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_wed_night_transit_1 <- wed_night_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_wed_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_wed_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_wed_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_wed_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_wed_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_wed_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_wed_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_wed_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_wed_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_wed_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_wed_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_wed_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_wed_night_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_wed_midnight_transit_1 <- wed_midnight_0300_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_wed_midnight_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_thurs_morn_transit_1 <- thurs_morn_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_thurs_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_thurs_afternoon_transit_1 <- thurs_afternoon_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_thurs_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_thurs_night_transit_1 <- thurs_night_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_thurs_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_thurs_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_thurs_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_thurs_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_thurs_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_thurs_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_thurs_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_thurs_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_thurs_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_thurs_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_thurs_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_thurs_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_thurs_night_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_thurs_midnight_0300_transit_1 <- thurs_midnight_0300_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_thurs_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_fri_morn_transit_1 <- fri_morn_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_fri_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_fri_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_fri_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_fri_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_fri_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_fri_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_fri_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_fri_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_fri_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_fri_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_fri_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_fri_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_fri_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_fri_afternoon_transit_1 <- fri_afternoon_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_fri_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_fri_night_transit_1 <- fri_night_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_fri_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_fri_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_fri_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_fri_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_fri_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_fri_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_fri_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_fri_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_fri_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_fri_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_fri_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_fri_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_fri_night_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_fri_midnight_0300_transit_1 <- fri_midnight_0300_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_fri_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_sun_morn_transit_1 <- sun_morn_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_sun_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_sun_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_sun_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_sun_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_sun_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_sun_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_sun_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_sun_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_sun_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_sun_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_sun_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_sun_morn_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_sun_morn_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_sun_afternoon_transit_1 <- sun_afternoon_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_sun_afternoon_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_sun_night_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_sun_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_sun_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_sun_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_sun_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_sun_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_sun_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_sun_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_sun_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_sun_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_sun_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_sun_night_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_sun_night_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_sun_night_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+```{r}
+bgs_sun_midnight_0300_transit_1 <- sun_midnight_0300_transit_1 %>%
+  filter(to_id == "brucegrovesouth")
+chsm_sun_midnight_0300_transit_1 <- sun_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamhighstreetmiddle")
+crm_sun_midnight_0300_transit_1 <- sun_midnight_0300_transit_1 %>%
+  filter(to_id == "claphamroadmiddle")
+dw_sun_midnight_0300_transit_1 <- sun_midnight_0300_transit_1 %>%
+  filter(to_id == "danelandwalk")
+ern_sun_midnight_0300_transit_1 <- sun_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadnorth")
+ers_sun_midnight_0300_transit_1 <- sun_midnight_0300_transit_1 %>%
+  filter(to_id == "edgwareroadsouth")
+hrm_sun_midnight_0300_transit_1 <- sun_midnight_0300_transit_1 %>%
+  filter(to_id == "highroadmiddle")
+krm_sun_midnight_0300_transit_1 <- sun_midnight_0300_transit_1 %>%
+  filter(to_id == "kenningtonroadmiddle")
+nrs_sun_midnight_0300_transit_1 <- sun_midnight_0300_transit_1 %>%
+  filter(to_id == "norwoodroadsouth")
+osw_sun_midnight_0300_transit_1 <- sun_midnight_0300_transit_1 %>%
+  filter(to_id == "oxfordstreetwest")
+shrm_sun_midnight_0300_transit_1 <- sun_midnight_0300_transit_1 %>%
+  filter(to_id == "streathamhighroadmiddle")
+tb_sun_midnight_0300_transit_1 <- sun_midnight_0300_transit_1 %>%
+  filter(to_id == "thebroadway")
+wrs_sun_midnight_0300_transit_1 <- sun_night_transit_1 %>%
+  filter(to_id == "wandsworthroadsouth")
+# Avg tt 
+mean(bgs_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(chsm_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(crm_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(dw_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(ern_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE)
+mean(ers_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(hrm_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(krm_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(nrs_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(osw_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(shrm_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+mean(tb_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE)
+mean(wrs_sun_midnight_0300_transit_1$travel_time_p50, na.rm = TRUE) 
+```
+
+## Tuesday 20 Feb
+
+### Transit
+
+```{r}
+
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("20-02-2024 10:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+tue_morn_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("20-02-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+tue_afternoon_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("20-02-2024 19:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+tue_night_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("20-02-2024 03:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+tue_midnight_0300_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+#### Export ttm
+
+```{r}
+write.csv(tue_morn_transit_1, file = "tue_morn_transit_1.csv", row.names = TRUE)
+#write.csv(mon_noon_transit_1, file = "mon_noon_transit_1.csv", row.names = TRUE)
+write.csv(tue_afternoon_transit_1, file = "tue_afternoon_transit_1.csv", row.names = TRUE)
+write.csv(tue_night_transit_1, file = "tue_night_transit_1.csv", row.names = TRUE)
+#write.csv(tue_midnight_0000_transit_1, file = "tue_midnight_0000_transit_1.csv", row.names = TRUE)
+write.csv(tue_midnight_0300_transit_1, file = "tue_midnight_0300_transit_1.csv", row.names = TRUE)
+```
+
+### Wednesday 13 March
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("13-03-2024 10:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+wed_morn_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("13-03-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+wed_afternoon_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("13-03-2024 19:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+wed_night_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("13-03-2024 03:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+wed_midnight_0300_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+#### Export ttm
+
+```{r}
+write.csv(wed_morn_transit_1, file = "wed_morn_transit_1.csv", row.names = TRUE)
+#write.csv(mon_noon_transit_1, file = "mon_noon_transit_1.csv", row.names = TRUE)
+write.csv(wed_afternoon_transit_1, file = "wed_afternoon_transit_1.csv", row.names = TRUE)
+write.csv(wed_night_transit_1, file = "wed_night_transit_1.csv", row.names = TRUE)
+#write.csv(tue_midnight_0000_transit_1, file = "tue_midnight_0000_transit_1.csv", row.names = TRUE)
+write.csv(wed_midnight_0300_transit_1, file = "wed_midnight_0300_transit_1.csv", row.names = TRUE)
+```
+
+### Thursday 18 April
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("18-04-2024 10:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+thurs_morn_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("18-04-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+thurs_afternoon_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("18-04-2024 19:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+thurs_night_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("18-04-2024 03:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+thurs_midnight_0300_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+#### Export ttm
+
+```{r}
+write.csv(thurs_morn_transit_1, file = "thurs_morn_transit_1.csv", row.names = TRUE)
+#write.csv(mon_noon_transit_1, file = "mon_noon_transit_1.csv", row.names = TRUE)
+write.csv(thurs_afternoon_transit_1, file = "thurs_afternoon_transit_1.csv", row.names = TRUE)
+write.csv(thurs_night_transit_1, file = "thurs_night_transit_1.csv", row.names = TRUE)
+#write.csv(tue_midnight_0000_transit_1, file = "tue_midnight_0000_transit_1.csv", row.names = TRUE)
+write.csv(thurs_midnight_0300_transit_1, file = "thurs_midnight_0300_transit_1.csv", row.names = TRUE)
+```
+
+### Friday 26 Jan
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("26-01-2024 10:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+fri_morn_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("26-01-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+fri_afternoon_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("26-01-2024 19:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+fri_night_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("26-01-2024 03:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+fri_midnight_0300_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+#### Export ttm
+
+```{r}
+write.csv(fri_morn_transit_1, file = "fri_morn_transit_1.csv", row.names = TRUE)
+#write.csv(mon_noon_transit_1, file = "mon_noon_transit_1.csv", row.names = TRUE)
+write.csv(fri_afternoon_transit_1, file = "fri_afternoon_transit_1.csv", row.names = TRUE)
+write.csv(fri_night_transit_1, file = "fri_night_transit_1.csv", row.names = TRUE)
+#write.csv(tue_midnight_0000_transit_1, file = "tue_midnight_0000_transit_1.csv", row.names = TRUE)
+write.csv(fri_midnight_0300_transit_1, file = "fri_midnight_0300_transit_1.csv", row.names = TRUE)
+```
+
+### Saturday 17 Feb
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("17-02-2024 10:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+sat_morn_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("17-02-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+sat_afternoon_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("17-02-2024 19:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+sat_night_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("17-02-2024 03:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+sat_midnight_0300_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+#### Export ttm
+
+```{r}
+write.csv(sat_morn_transit_1, file = "sat_morn_transit_1.csv", row.names = TRUE)
+#write.csv(mon_noon_transit_1, file = "mon_noon_transit_1.csv", row.names = TRUE)
+write.csv(sat_afternoon_transit_1, file = "sat_afternoon_transit_1.csv", row.names = TRUE)
+write.csv(sat_night_transit_1, file = "sat_night_transit_1.csv", row.names = TRUE)
+#write.csv(tue_midnight_0000_transit_1, file = "tue_midnight_0000_transit_1.csv", row.names = TRUE)
+write.csv(sat_midnight_0300_transit_1, file = "sat_midnight_0300_transit_1.csv", row.names = TRUE)
+```
+
+### Sunday 30 March
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("30-03-2024 10:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+sun_morn_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("30-03-2024 14:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+sun_afternoon_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("30-03-2024 19:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+sun_night_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+```{r}
+mode <- "transit"
+# max_walk_time <- 60 # minutes
+max_trip_duration <- 60 # minutes
+departure_datetime <- as.POSIXct("30-03-2024 03:00:00",
+                                 format = "%d-%m-%Y %H:%M:%S")
+
+# calculate a travel time matrix
+sun_midnight_0300_transit_1 <- travel_time_matrix(r5r_core = r5r_core,
+                          origins = ori_wards_point,
+                          destinations = dest_ff_point,
+                          mode = mode,
+                          departure_datetime = departure_datetime,
+                          # max_walk_time = max_walk_time,
+                          max_trip_duration = max_trip_duration)
+```
+
+#### Export ttm
+
+```{r}
+write.csv(sun_morn_transit_1, file = "sun_morn_transit_1.csv", row.names = TRUE)
+#write.csv(mon_noon_transit_1, file = "mon_noon_transit_1.csv", row.names = TRUE)
+write.csv(sun_afternoon_transit_1, file = "sun_afternoon_transit_1.csv", row.names = TRUE)
+write.csv(sun_night_transit_1, file = "sun_night_transit_1.csv", row.names = TRUE)
+#write.csv(tue_midnight_0000_transit_1, file = "tue_midnight_0000_transit_1.csv", row.names = TRUE)
+write.csv(sun_midnight_0300_transit_1, file = "sun_midnight_0300_transit_1.csv", row.names = TRUE)
+```
+
+# Count the number of connected wards to each ff lcoation
+
+```{r}
+sum(mon_morn_transit_1$to_id == "brucegrovesouth")
+sum(mon_morn_transit_1$to_id == "claphamhighstreetmiddle")
+sum(mon_morn_transit_1$to_id == "claphamroadmiddle")
+sum(mon_morn_transit_1$to_id == "danelandwalk")
+sum(mon_morn_transit_1$to_id == "edgwareroadnorth")
+sum(mon_morn_transit_1$to_id == "edgwareroadsouth")
+sum(mon_morn_transit_1$to_id == "highroadmiddle")
+sum(mon_morn_transit_1$to_id == "kenningtonroadmiddle")
+sum(mon_morn_transit_1$to_id == "norwoodroadsouth")
+sum(mon_morn_transit_1$to_id == "oxfordstreetwest")
+sum(mon_morn_transit_1$to_id == "streathamhighroadmiddle")
+sum(mon_morn_transit_1$to_id == "thebroadway")
+sum(mon_morn_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(mon_afternoon_transit_1$to_id == "brucegrovesouth")
+sum(mon_afternoon_transit_1$to_id == "claphamhighstreetmiddle")
+sum(mon_morn_transit_1$to_id == "claphamroadmiddle")
+sum(mon_afternoon_transit_1$to_id == "danelandwalk")
+sum(mon_afternoon_transit_1$to_id == "edgwareroadnorth")
+sum(mon_afternoon_transit_1$to_id == "edgwareroadsouth")
+sum(mon_afternoon_transit_1$to_id == "highroadmiddle")
+sum(mon_afternoon_transit_1$to_id == "kenningtonroadmiddle")
+sum(mon_afternoon_transit_1$to_id == "norwoodroadsouth")
+sum(mon_afternoon_transit_1$to_id == "oxfordstreetwest")
+sum(mon_afternoon_transit_1$to_id == "streathamhighroadmiddle")
+sum(mon_afternoon_transit_1$to_id == "thebroadway")
+sum(mon_afternoon_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(mon_night_transit_1$to_id == "brucegrovesouth")
+sum(mon_night_transit_1$to_id == "claphamhighstreetmiddle")
+sum(mon_night_transit_1$to_id == "claphamroadmiddle")
+sum(mon_night_transit_1$to_id == "danelandwalk")
+sum(mon_night_transit_1$to_id == "edgwareroadnorth")
+sum(mon_night_transit_1$to_id == "edgwareroadsouth")
+sum(mon_night_transit_1$to_id == "highroadmiddle")
+sum(mon_night_transit_1$to_id == "kenningtonroadmiddle")
+sum(mon_night_transit_1$to_id == "norwoodroadsouth")
+sum(mon_night_transit_1$to_id == "oxfordstreetwest")
+sum(mon_night_transit_1$to_id == "streathamhighroadmiddle")
+sum(mon_night_transit_1$to_id == "thebroadway")
+sum(mon_night_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(mon_midnight_0300_transit_1$to_id == "brucegrovesouth")
+sum(mon_midnight_0300_transit_1$to_id == "claphamhighstreetmiddle")
+sum(mon_midnight_0300_transit_1$to_id == "claphamroadmiddle")
+sum(mon_midnight_0300_transit_1$to_id == "danelandwalk")
+sum(mon_midnight_0300_transit_1$to_id == "edgwareroadnorth")
+sum(mon_midnight_0300_transit_1$to_id == "edgwareroadsouth")
+sum(mon_midnight_0300_transit_1$to_id == "highroadmiddle")
+sum(mon_midnight_0300_transit_1$to_id == "kenningtonroadmiddle")
+sum(mon_midnight_0300_transit_1$to_id == "norwoodroadsouth")
+sum(mon_midnight_0300_transit_1$to_id == "oxfordstreetwest")
+sum(mon_midnight_0300_transit_1$to_id == "streathamhighroadmiddle")
+sum(mon_midnight_0300_transit_1$to_id == "thebroadway")
+sum(mon_midnight_0300_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(tue_morn_transit_1$to_id == "brucegrovesouth")
+sum(tue_morn_transit_1$to_id == "claphamhighstreetmiddle")
+sum(tue_morn_transit_1$to_id == "claphamroadmiddle")
+sum(tue_morn_transit_1$to_id == "danelandwalk")
+sum(tue_morn_transit_1$to_id == "edgwareroadnorth")
+sum(tue_morn_transit_1$to_id == "edgwareroadsouth")
+sum(tue_morn_transit_1$to_id == "highroadmiddle")
+sum(tue_morn_transit_1$to_id == "kenningtonroadmiddle")
+sum(tue_morn_transit_1$to_id == "norwoodroadsouth")
+sum(tue_morn_transit_1$to_id == "oxfordstreetwest")
+sum(tue_morn_transit_1$to_id == "streathamhighroadmiddle")
+sum(tue_morn_transit_1$to_id == "thebroadway")
+sum(tue_morn_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(sat_morn_transit_1$to_id == "brucegrovesouth")
+sum(sat_morn_transit_1$to_id == "claphamhighstreetmiddle")
+sum(sat_morn_transit_1$to_id == "claphamroadmiddle")
+sum(sat_morn_transit_1$to_id == "danelandwalk")
+sum(sat_morn_transit_1$to_id == "edgwareroadnorth")
+sum(sat_morn_transit_1$to_id == "edgwareroadsouth")
+sum(sat_morn_transit_1$to_id == "highroadmiddle")
+sum(sat_morn_transit_1$to_id == "kenningtonroadmiddle")
+sum(sat_morn_transit_1$to_id == "norwoodroadsouth")
+sum(sat_morn_transit_1$to_id == "oxfordstreetwest")
+sum(sat_morn_transit_1$to_id == "streathamhighroadmiddle")
+sum(sat_morn_transit_1$to_id == "thebroadway")
+sum(sat_morn_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(sat_afternoon_transit_1$to_id == "brucegrovesouth")
+sum(sat_afternoon_transit_1$to_id == "claphamhighstreetmiddle")
+sum(sat_afternoon_transit_1$to_id == "claphamroadmiddle")
+sum(sat_afternoon_transit_1$to_id == "danelandwalk")
+sum(sat_afternoon_transit_1$to_id == "edgwareroadnorth")
+sum(sat_afternoon_transit_1$to_id == "edgwareroadsouth")
+sum(sat_afternoon_transit_1$to_id == "highroadmiddle")
+sum(sat_afternoon_transit_1$to_id == "kenningtonroadmiddle")
+sum(sat_afternoon_transit_1$to_id == "norwoodroadsouth")
+sum(sat_afternoon_transit_1$to_id == "oxfordstreetwest")
+sum(sat_afternoon_transit_1$to_id == "streathamhighroadmiddle")
+sum(sat_afternoon_transit_1$to_id == "thebroadway")
+sum(sat_afternoon_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(sat_night_transit_1$to_id == "brucegrovesouth")
+sum(sat_night_transit_1$to_id == "claphamhighstreetmiddle")
+sum(sat_night_transit_1$to_id == "claphamroadmiddle")
+sum(sat_night_transit_1$to_id == "danelandwalk")
+sum(sat_night_transit_1$to_id == "edgwareroadnorth")
+sum(sat_night_transit_1$to_id == "edgwareroadsouth")
+sum(sat_night_transit_1$to_id == "highroadmiddle")
+sum(sat_night_transit_1$to_id == "kenningtonroadmiddle")
+sum(sat_night_transit_1$to_id == "norwoodroadsouth")
+sum(sat_night_transit_1$to_id == "oxfordstreetwest")
+sum(sat_night_transit_1$to_id == "streathamhighroadmiddle")
+sum(sat_night_transit_1$to_id == "thebroadway")
+sum(sat_night_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(sat_midnight_0300_transit_1$to_id == "brucegrovesouth")
+sum(sat_midnight_0300_transit_1$to_id == "claphamhighstreetmiddle")
+sum(sat_midnight_0300_transit_1$to_id == "claphamroadmiddle")
+sum(sat_midnight_0300_transit_1$to_id == "danelandwalk")
+sum(sat_midnight_0300_transit_1$to_id == "edgwareroadnorth")
+sum(sat_midnight_0300_transit_1$to_id == "edgwareroadsouth")
+sum(sat_midnight_0300_transit_1$to_id == "highroadmiddle")
+sum(sat_midnight_0300_transit_1$to_id == "kenningtonroadmiddle")
+sum(sat_midnight_0300_transit_1$to_id == "norwoodroadsouth")
+sum(sat_midnight_0300_transit_1$to_id == "oxfordstreetwest")
+sum(sat_midnight_0300_transit_1$to_id == "streathamhighroadmiddle")
+sum(sat_midnight_0300_transit_1$to_id == "thebroadway")
+sum(sat_midnight_0300_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(tue_morn_transit_1$to_id == "brucegrovesouth")
+sum(tue_morn_transit_1$to_id == "claphamhighstreetmiddle")
+sum(tue_morn_transit_1$to_id == "claphamroadmiddle")
+sum(tue_morn_transit_1$to_id == "danelandwalk")
+sum(tue_morn_transit_1$to_id == "edgwareroadnorth")
+sum(tue_morn_transit_1$to_id == "edgwareroadsouth")
+sum(tue_morn_transit_1$to_id == "highroadmiddle")
+sum(tue_morn_transit_1$to_id == "kenningtonroadmiddle")
+sum(tue_morn_transit_1$to_id == "norwoodroadsouth")
+sum(tue_morn_transit_1$to_id == "oxfordstreetwest")
+sum(tue_morn_transit_1$to_id == "streathamhighroadmiddle")
+sum(tue_morn_transit_1$to_id == "thebroadway")
+sum(tue_morn_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(tue_afternoon_transit_1$to_id == "brucegrovesouth")
+sum(tue_afternoon_transit_1$to_id == "claphamhighstreetmiddle")
+sum(tue_afternoon_transit_1$to_id == "claphamroadmiddle")
+sum(tue_afternoon_transit_1$to_id == "danelandwalk")
+sum(sat_afternoon_transit_1$to_id == "edgwareroadnorth")
+sum(tue_afternoon_transit_1$to_id == "edgwareroadsouth")
+sum(tue_afternoon_transit_1$to_id == "highroadmiddle")
+sum(tue_afternoon_transit_1$to_id == "kenningtonroadmiddle")
+sum(tue_afternoon_transit_1$to_id == "norwoodroadsouth")
+sum(tue_afternoon_transit_1$to_id == "oxfordstreetwest")
+sum(tue_afternoon_transit_1$to_id == "streathamhighroadmiddle")
+sum(tue_afternoon_transit_1$to_id == "thebroadway")
+sum(tue_afternoon_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(tue_night_transit_1$to_id == "brucegrovesouth")
+sum(tue_night_transit_1$to_id == "claphamhighstreetmiddle")
+sum(tue_night_transit_1$to_id == "claphamroadmiddle")
+sum(tue_night_transit_1$to_id == "danelandwalk")
+sum(tue_night_transit_1$to_id == "edgwareroadnorth")
+sum(tue_night_transit_1$to_id == "edgwareroadsouth")
+sum(tue_night_transit_1$to_id == "highroadmiddle")
+sum(tue_night_transit_1$to_id == "kenningtonroadmiddle")
+sum(tue_night_transit_1$to_id == "norwoodroadsouth")
+sum(tue_night_transit_1$to_id == "oxfordstreetwest")
+sum(tue_night_transit_1$to_id == "streathamhighroadmiddle")
+sum(tue_night_transit_1$to_id == "thebroadway")
+sum(tue_night_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(tue_midnight_0300_transit_1$to_id == "brucegrovesouth")
+sum(tue_midnight_0300_transit_1$to_id == "claphamhighstreetmiddle")
+sum(tue_midnight_0300_transit_1$to_id == "claphamroadmiddle")
+sum(tue_midnight_0300_transit_1$to_id == "danelandwalk")
+sum(tue_midnight_0300_transit_1$to_id == "edgwareroadnorth")
+sum(tue_midnight_0300_transit_1$to_id == "edgwareroadsouth")
+sum(tue_midnight_0300_transit_1$to_id == "highroadmiddle")
+sum(tue_midnight_0300_transit_1$to_id == "kenningtonroadmiddle")
+sum(tue_midnight_0300_transit_1$to_id == "norwoodroadsouth")
+sum(tue_midnight_0300_transit_1$to_id == "oxfordstreetwest")
+sum(tue_midnight_0300_transit_1$to_id == "streathamhighroadmiddle")
+sum(tue_midnight_0300_transit_1$to_id == "thebroadway")
+sum(tue_midnight_0300_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(wed_morn_transit_1$to_id == "brucegrovesouth")
+sum(wed_morn_transit_1$to_id == "claphamhighstreetmiddle")
+sum(wed_morn_transit_1$to_id == "claphamroadmiddle")
+sum(wed_morn_transit_1$to_id == "danelandwalk")
+sum(wed_morn_transit_1$to_id == "edgwareroadnorth")
+sum(wed_morn_transit_1$to_id == "edgwareroadsouth")
+sum(wed_morn_transit_1$to_id == "highroadmiddle")
+sum(wed_morn_transit_1$to_id == "kenningtonroadmiddle")
+sum(wed_morn_transit_1$to_id == "norwoodroadsouth")
+sum(wed_morn_transit_1$to_id == "oxfordstreetwest")
+sum(wed_morn_transit_1$to_id == "streathamhighroadmiddle")
+sum(wed_morn_transit_1$to_id == "thebroadway")
+sum(wed_morn_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(wed_afternoon_transit_1$to_id == "brucegrovesouth")
+sum(wed_afternoon_transit_1$to_id == "claphamhighstreetmiddle")
+sum(wed_afternoon_transit_1$to_id == "claphamroadmiddle")
+sum(wed_afternoon_transit_1$to_id == "danelandwalk")
+sum(wed_afternoon_transit_1$to_id == "edgwareroadnorth")
+sum(wed_afternoon_transit_1$to_id == "edgwareroadsouth")
+sum(wed_afternoon_transit_1$to_id == "highroadmiddle")
+sum(wed_afternoon_transit_1$to_id == "kenningtonroadmiddle")
+sum(wed_afternoon_transit_1$to_id == "norwoodroadsouth")
+sum(wed_afternoon_transit_1$to_id == "oxfordstreetwest")
+sum(wed_afternoon_transit_1$to_id == "streathamhighroadmiddle")
+sum(wed_afternoon_transit_1$to_id == "thebroadway")
+sum(wed_afternoon_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(wed_night_transit_1$to_id == "brucegrovesouth")
+sum(wed_night_transit_1$to_id == "claphamhighstreetmiddle")
+sum(wed_night_transit_1$to_id == "claphamroadmiddle")
+sum(wed_night_transit_1$to_id == "danelandwalk")
+sum(wed_night_transit_1$to_id == "edgwareroadnorth")
+sum(wed_night_transit_1$to_id == "edgwareroadsouth")
+sum(wed_night_transit_1$to_id == "highroadmiddle")
+sum(wed_night_transit_1$to_id == "kenningtonroadmiddle")
+sum(wed_night_transit_1$to_id == "norwoodroadsouth")
+sum(wed_night_transit_1$to_id == "oxfordstreetwest")
+sum(wed_night_transit_1$to_id == "streathamhighroadmiddle")
+sum(wed_night_transit_1$to_id == "thebroadway")
+sum(wed_night_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(wed_midnight_0300_transit_1$to_id == "brucegrovesouth")
+sum(wed_midnight_0300_transit_1$to_id == "claphamhighstreetmiddle")
+sum(wed_midnight_0300_transit_1$to_id == "claphamroadmiddle")
+sum(wed_midnight_0300_transit_1$to_id == "danelandwalk")
+sum(wed_midnight_0300_transit_1$to_id == "edgwareroadnorth")
+sum(wed_midnight_0300_transit_1$to_id == "edgwareroadsouth")
+sum(wed_midnight_0300_transit_1$to_id == "highroadmiddle")
+sum(wed_midnight_0300_transit_1$to_id == "kenningtonroadmiddle")
+sum(wed_midnight_0300_transit_1$to_id == "norwoodroadsouth")
+sum(wed_midnight_0300_transit_1$to_id == "oxfordstreetwest")
+sum(wed_midnight_0300_transit_1$to_id == "streathamhighroadmiddle")
+sum(wed_midnight_0300_transit_1$to_id == "thebroadway")
+sum(wed_midnight_0300_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(thurs_morn_transit_1$to_id == "brucegrovesouth")
+sum(thurs_morn_transit_1$to_id == "claphamhighstreetmiddle")
+sum(thurs_morn_transit_1$to_id == "claphamroadmiddle")
+sum(thurs_morn_transit_1$to_id == "danelandwalk")
+sum(thurs_morn_transit_1$to_id == "edgwareroadnorth")
+sum(thurs_morn_transit_1$to_id == "edgwareroadsouth")
+sum(thurs_morn_transit_1$to_id == "highroadmiddle")
+sum(thurs_morn_transit_1$to_id == "kenningtonroadmiddle")
+sum(thurs_morn_transit_1$to_id == "norwoodroadsouth")
+sum(thurs_morn_transit_1$to_id == "oxfordstreetwest")
+sum(thurs_morn_transit_1$to_id == "streathamhighroadmiddle")
+sum(thurs_morn_transit_1$to_id == "thebroadway")
+sum(thurs_morn_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(thurs_afternoon_transit_1$to_id == "brucegrovesouth")
+sum(thurs_afternoon_transit_1$to_id == "claphamhighstreetmiddle")
+sum(thurs_afternoon_transit_1$to_id == "claphamroadmiddle")
+sum(thurs_afternoon_transit_1$to_id == "danelandwalk")
+sum(thurs_afternoon_transit_1$to_id == "edgwareroadnorth")
+sum(thurs_afternoon_transit_1$to_id == "edgwareroadsouth")
+sum(thurs_afternoon_transit_1$to_id == "highroadmiddle")
+sum(thurs_afternoon_transit_1$to_id == "kenningtonroadmiddle")
+sum(thurs_afternoon_transit_1$to_id == "norwoodroadsouth")
+sum(thurs_afternoon_transit_1$to_id == "oxfordstreetwest")
+sum(thurs_afternoon_transit_1$to_id == "streathamhighroadmiddle")
+sum(thurs_afternoon_transit_1$to_id == "thebroadway")
+sum(thurs_afternoon_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(thurs_night_transit_1$to_id == "brucegrovesouth")
+sum(thurs_night_transit_1$to_id == "claphamhighstreetmiddle")
+sum(thurs_night_transit_1$to_id == "claphamroadmiddle")
+sum(thurs_night_transit_1$to_id == "danelandwalk")
+sum(thurs_night_transit_1$to_id == "edgwareroadnorth")
+sum(thurs_night_transit_1$to_id == "edgwareroadsouth")
+sum(thurs_night_transit_1$to_id == "highroadmiddle")
+sum(thurs_night_transit_1$to_id == "kenningtonroadmiddle")
+sum(thurs_night_transit_1$to_id == "norwoodroadsouth")
+sum(thurs_night_transit_1$to_id == "oxfordstreetwest")
+sum(thurs_night_transit_1$to_id == "streathamhighroadmiddle")
+sum(thurs_night_transit_1$to_id == "thebroadway")
+sum(thurs_night_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(thurs_midnight_0300_transit_1$to_id == "brucegrovesouth")
+sum(thurs_midnight_0300_transit_1$to_id == "claphamhighstreetmiddle")
+sum(thurs_midnight_0300_transit_1$to_id == "claphamroadmiddle")
+sum(thurs_midnight_0300_transit_1$to_id == "danelandwalk")
+sum(thurs_midnight_0300_transit_1$to_id == "edgwareroadnorth")
+sum(thurs_midnight_0300_transit_1$to_id == "edgwareroadsouth")
+sum(thurs_midnight_0300_transit_1$to_id == "highroadmiddle")
+sum(thurs_midnight_0300_transit_1$to_id == "kenningtonroadmiddle")
+sum(thurs_midnight_0300_transit_1$to_id == "norwoodroadsouth")
+sum(thurs_midnight_0300_transit_1$to_id == "oxfordstreetwest")
+sum(thurs_midnight_0300_transit_1$to_id == "streathamhighroadmiddle")
+sum(thurs_midnight_0300_transit_1$to_id == "thebroadway")
+sum(thurs_midnight_0300_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(fri_morn_transit_1$to_id == "brucegrovesouth")
+sum(fri_morn_transit_1$to_id == "claphamhighstreetmiddle")
+sum(fri_morn_transit_1$to_id == "claphamroadmiddle")
+sum(fri_morn_transit_1$to_id == "danelandwalk")
+sum(fri_morn_transit_1$to_id == "edgwareroadnorth")
+sum(fri_morn_transit_1$to_id == "edgwareroadsouth")
+sum(fri_morn_transit_1$to_id == "highroadmiddle")
+sum(fri_morn_transit_1$to_id == "kenningtonroadmiddle")
+sum(fri_morn_transit_1$to_id == "norwoodroadsouth")
+sum(fri_morn_transit_1$to_id == "oxfordstreetwest")
+sum(fri_morn_transit_1$to_id == "streathamhighroadmiddle")
+sum(fri_morn_transit_1$to_id == "thebroadway")
+sum(fri_morn_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(fri_afternoon_transit_1$to_id == "brucegrovesouth")
+sum(fri_afternoon_transit_1$to_id == "claphamhighstreetmiddle")
+sum(fri_afternoon_transit_1$to_id == "claphamroadmiddle")
+sum(fri_afternoon_transit_1$to_id == "danelandwalk")
+sum(fri_afternoon_transit_1$to_id == "edgwareroadnorth")
+sum(fri_afternoon_transit_1$to_id == "edgwareroadsouth")
+sum(fri_afternoon_transit_1$to_id == "highroadmiddle")
+sum(fri_afternoon_transit_1$to_id == "kenningtonroadmiddle")
+sum(fri_afternoon_transit_1$to_id == "norwoodroadsouth")
+sum(fri_afternoon_transit_1$to_id == "oxfordstreetwest")
+sum(fri_afternoon_transit_1$to_id == "streathamhighroadmiddle")
+sum(fri_afternoon_transit_1$to_id == "thebroadway")
+sum(fri_afternoon_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(fri_night_transit_1$to_id == "brucegrovesouth")
+sum(fri_night_transit_1$to_id == "claphamhighstreetmiddle")
+sum(fri_night_transit_1$to_id == "claphamroadmiddle")
+sum(fri_night_transit_1$to_id == "danelandwalk")
+sum(fri_night_transit_1$to_id == "edgwareroadnorth")
+sum(fri_night_transit_1$to_id == "edgwareroadsouth")
+sum(fri_night_transit_1$to_id == "highroadmiddle")
+sum(fri_night_transit_1$to_id == "kenningtonroadmiddle")
+sum(fri_night_transit_1$to_id == "norwoodroadsouth")
+sum(fri_night_transit_1$to_id == "oxfordstreetwest")
+sum(fri_night_transit_1$to_id == "streathamhighroadmiddle")
+sum(fri_night_transit_1$to_id == "thebroadway")
+sum(fri_night_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(fri_midnight_0300_transit_1$to_id == "brucegrovesouth")
+sum(fri_midnight_0300_transit_1$to_id == "claphamhighstreetmiddle")
+sum(fri_midnight_0300_transit_1$to_id == "claphamroadmiddle")
+sum(fri_midnight_0300_transit_1$to_id == "danelandwalk")
+sum(fri_midnight_0300_transit_1$to_id == "edgwareroadnorth")
+sum(fri_midnight_0300_transit_1$to_id == "edgwareroadsouth")
+sum(fri_midnight_0300_transit_1$to_id == "highroadmiddle")
+sum(fri_midnight_0300_transit_1$to_id == "kenningtonroadmiddle")
+sum(fri_midnight_0300_transit_1$to_id == "norwoodroadsouth")
+sum(fri_midnight_0300_transit_1$to_id == "oxfordstreetwest")
+sum(fri_midnight_0300_transit_1$to_id == "streathamhighroadmiddle")
+sum(fri_midnight_0300_transit_1$to_id == "thebroadway")
+sum(fri_midnight_0300_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(sun_morn_transit_1$to_id == "brucegrovesouth")
+sum(sun_morn_transit_1$to_id == "claphamhighstreetmiddle")
+sum(sun_morn_transit_1$to_id == "claphamroadmiddle")
+sum(sun_morn_transit_1$to_id == "danelandwalk")
+sum(sun_morn_transit_1$to_id == "edgwareroadnorth")
+sum(sun_morn_transit_1$to_id == "edgwareroadsouth")
+sum(sun_morn_transit_1$to_id == "highroadmiddle")
+sum(sun_morn_transit_1$to_id == "kenningtonroadmiddle")
+sum(sun_morn_transit_1$to_id == "norwoodroadsouth")
+sum(sun_morn_transit_1$to_id == "oxfordstreetwest")
+sum(sun_morn_transit_1$to_id == "streathamhighroadmiddle")
+sum(sun_morn_transit_1$to_id == "thebroadway")
+sum(sun_morn_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(sun_afternoon_transit_1$to_id == "brucegrovesouth")
+sum(sun_afternoon_transit_1$to_id == "claphamhighstreetmiddle")
+sum(sun_afternoon_transit_1$to_id == "claphamroadmiddle")
+sum(sun_afternoon_transit_1$to_id == "danelandwalk")
+sum(sun_afternoon_transit_1$to_id == "edgwareroadnorth")
+sum(sun_afternoon_transit_1$to_id == "edgwareroadsouth")
+sum(sun_afternoon_transit_1$to_id == "highroadmiddle")
+sum(sun_afternoon_transit_1$to_id == "kenningtonroadmiddle")
+sum(sun_afternoon_transit_1$to_id == "norwoodroadsouth")
+sum(sun_afternoon_transit_1$to_id == "oxfordstreetwest")
+sum(sun_afternoon_transit_1$to_id == "streathamhighroadmiddle")
+sum(sun_afternoon_transit_1$to_id == "thebroadway")
+sum(sun_afternoon_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(sun_night_transit_1$to_id == "brucegrovesouth")
+sum(sun_night_transit_1$to_id == "claphamhighstreetmiddle")
+sum(sun_night_transit_1$to_id == "claphamroadmiddle")
+sum(sun_night_transit_1$to_id == "danelandwalk")
+sum(sun_night_transit_1$to_id == "edgwareroadnorth")
+sum(sun_night_transit_1$to_id == "edgwareroadsouth")
+sum(sun_night_transit_1$to_id == "highroadmiddle")
+sum(sun_night_transit_1$to_id == "kenningtonroadmiddle")
+sum(sun_night_transit_1$to_id == "norwoodroadsouth")
+sum(sun_night_transit_1$to_id == "oxfordstreetwest")
+sum(sun_night_transit_1$to_id == "streathamhighroadmiddle")
+sum(sun_night_transit_1$to_id == "thebroadway")
+sum(sun_night_transit_1$to_id == "wandsworthroadsouth")
+```
+
+```{r}
+sum(sun_midnight_0300_transit_1$to_id == "brucegrovesouth")
+sum(sun_midnight_0300_transit_1$to_id == "claphamhighstreetmiddle")
+sum(sun_midnight_0300_transit_1$to_id == "claphamroadmiddle")
+sum(sun_midnight_0300_transit_1$to_id == "danelandwalk")
+sum(sun_midnight_0300_transit_1$to_id == "edgwareroadnorth")
+sum(sun_midnight_0300_transit_1$to_id == "edgwareroadsouth")
+sum(sun_midnight_0300_transit_1$to_id == "highroadmiddle")
+sum(sun_midnight_0300_transit_1$to_id == "kenningtonroadmiddle")
+sum(sun_midnight_0300_transit_1$to_id == "norwoodroadsouth")
+sum(sun_midnight_0300_transit_1$to_id == "oxfordstreetwest")
+sum(sun_midnight_0300_transit_1$to_id == "streathamhighroadmiddle")
+sum(sun_midnight_0300_transit_1$to_id == "thebroadway")
+sum(sun_midnight_0300_transit_1$to_id == "wandsworthroadsouth")
+```
