@@ -6,3 +6,5 @@ However, ESRI shapefile for London and GTFS are too large to upload to gihub, th
 Transit feed for r5r package accessibility analysis https://gtfs.org/schedule/
 
 London shapefile https://data.london.gov.uk/dataset/statistical-gis-boundary-files-london
+
+Samples/ tutorials for the use of r5r package in R Studio: https://www.urbandemographics.org/post/r5r-fast-multimodal-transport-routing-in-r/
